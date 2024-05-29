@@ -3,6 +3,7 @@ module Grpc exposing
     , addHeader, addHeaders, setHost, setTimeout, setTracker, withRisk
     , toTask, toCmd
     , Error(..), GrpcStatus(..)
+    , rpcPath
     )
 
 {-| This is the public API for gRPC application usage. It is intended to be imported qualified.
@@ -26,6 +27,11 @@ module Grpc exposing
 # Handling Errors
 
 @docs Error, GrpcStatus
+
+
+# Utils
+
+@docs rpcPath
 
 -}
 
@@ -142,7 +148,7 @@ toCmd expect (InternalRpcRequest req) =
     toHttpRequest
         { method = "POST"
         , headers = req.headers
-        , url = req.host ++ rpcToUrl req.rpc
+        , url = req.host ++ rpcPath req.rpc
         , body = body
         , timeout = req.timeout
         , expect = Http.expectBytesResponse expect (handleResponse rpc.decoder)
@@ -174,7 +180,7 @@ toTask (InternalRpcRequest req) =
     toHttpTask
         { method = "POST"
         , headers = req.headers
-        , url = req.host ++ rpcToUrl req.rpc
+        , url = req.host ++ rpcPath req.rpc
         , body = body
         , timeout = req.timeout
         , resolver = Http.bytesResolver (handleResponse rpc.decoder)
@@ -260,6 +266,24 @@ type GrpcStatus
       Unauthenticated
 
 
+{-| Construct the request URL for a given `Rpc`.
+This can be used for example to improve error reporting
+so its easier to know which call failed.
+-}
+rpcPath : Rpc req res -> String
+rpcPath (Grpc.Internal.Rpc { service, package, rpcName }) =
+    "/"
+        ++ (if String.isEmpty package then
+                ""
+
+            else
+                package ++ "."
+           )
+        ++ service
+        ++ "/"
+        ++ rpcName
+
+
 
 -- INTERNALS
 
@@ -279,20 +303,6 @@ type InternalRpcRequest req res usesTracker
 grpcContentType : String
 grpcContentType =
     "application/grpc-web+proto"
-
-
-rpcToUrl : Rpc req res -> String
-rpcToUrl (Grpc.Internal.Rpc { service, package, rpcName }) =
-    "/"
-        ++ (if String.isEmpty package then
-                ""
-
-            else
-                package ++ "."
-           )
-        ++ service
-        ++ "/"
-        ++ rpcName
 
 
 handleResponse : Decoder res -> Http.Response Bytes -> Result Error res
