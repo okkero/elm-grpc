@@ -1,4 +1,7 @@
-module Grpc.Internal exposing (Rpc(..))
+module Grpc.Internal exposing
+    ( Rpc(..)
+    , ResponseDecoder, singleMessageDecoder, streamToListDecoder
+    )
 
 {-| Internals that are intended to be used from code generators.
 
@@ -9,8 +12,14 @@ module Grpc.Internal exposing (Rpc(..))
 
 -}
 
+import Array exposing (Array)
+import Bytes exposing (Bytes)
 import Protobuf.Decode exposing (Decoder)
 import Protobuf.Encode exposing (Encoder)
+
+
+type alias ResponseDecoder res =
+    Array Bytes -> Maybe res
 
 
 {-| Given the following proto file
@@ -52,5 +61,36 @@ type Rpc req res
         , package : String
         , rpcName : String
         , encoder : req -> Encoder
-        , decoder : Decoder res
+        , decoder : ResponseDecoder res
         }
+
+
+singleMessageDecoder : Decoder res -> ResponseDecoder res
+singleMessageDecoder decoder =
+    Array.get 0
+        >> Maybe.andThen (Protobuf.Decode.decode decoder)
+
+
+streamToListDecoder : Decoder res -> ResponseDecoder (List res)
+streamToListDecoder decoder =
+    Array.toList
+        >> List.map (Protobuf.Decode.decode decoder)
+        >> combineMaybes
+
+
+combineMaybes : List (Maybe a) -> Maybe (List a)
+combineMaybes =
+    let
+        helper : List a -> List (Maybe a) -> Maybe (List a)
+        helper acc maybes =
+            case maybes of
+                [] ->
+                    Just <| List.reverse acc
+
+                Nothing :: _ ->
+                    Nothing
+
+                (Just x) :: xs ->
+                    helper (x :: acc) xs
+    in
+    helper []

@@ -35,13 +35,14 @@ module Grpc exposing
 
 -}
 
+import Array exposing (Array)
+import Bitwise
 import Bytes exposing (Bytes)
 import Bytes.Decode
 import Bytes.Encode
-import Dict
-import Grpc.Internal
+import Dict exposing (Dict)
+import Grpc.Internal exposing (ResponseDecoder)
 import Http exposing (Response(..), header)
-import Protobuf.Decode exposing (Decoder, decode)
 import Protobuf.Encode exposing (encode)
 import Task exposing (Task)
 
@@ -305,7 +306,7 @@ grpcContentType =
     "application/grpc-web+proto"
 
 
-handleResponse : Decoder res -> Http.Response Bytes -> Result Error res
+handleResponse : ResponseDecoder res -> Http.Response Bytes -> Result Error res
 handleResponse decoder httpResponse =
     let
         parseResponse : Bool -> Http.Metadata -> Bytes -> Result Error res
@@ -326,9 +327,39 @@ handleResponse decoder httpResponse =
             in
             case grpcStatus of
                 Ok_ ->
-                    Bytes.Decode.decode responseDecoder bytes
-                        |> Maybe.andThen (\response -> decode decoder response.message)
+                    Bytes.Decode.decode
+                        responseDecoder
+                        bytes
                         |> Result.fromMaybe (BadBody bytes)
+                        |> Result.andThen
+                            (\response ->
+                                let
+                                    status =
+                                        response.headers
+                                            |> Dict.get "grpc-status"
+                                            |> Maybe.andThen String.toInt
+                                            |> Maybe.andThen errCodeFromInt
+                                            |> Maybe.withDefault defaultGrpcStatus
+                                in
+                                if status == Ok_ then
+                                    response.messages
+                                        |> decoder
+                                        |> Result.fromMaybe (BadBody bytes)
+
+                                else
+                                    let
+                                        errMessage =
+                                            Dict.get "grpc-message" response.headers
+                                                |> Maybe.withDefault metadata.statusText
+                                    in
+                                    Err <|
+                                        BadStatus
+                                            { status = status
+                                            , errMessage = errMessage
+                                            , metadata = { metadata | headers = response.headers }
+                                            , response = bytes
+                                            }
+                            )
 
                 _ ->
                     let
@@ -336,7 +367,13 @@ handleResponse decoder httpResponse =
                             Dict.get "grpc-message" metadata.headers
                                 |> Maybe.withDefault metadata.statusText
                     in
-                    Err <| BadStatus { status = grpcStatus, errMessage = errMessage, metadata = metadata, response = bytes }
+                    Err <|
+                        BadStatus
+                            { status = grpcStatus
+                            , errMessage = errMessage
+                            , metadata = metadata
+                            , response = bytes
+                            }
     in
     case httpResponse of
         GoodStatus_ metadata bytes ->
@@ -402,16 +439,71 @@ requestEncoder message =
 
 
 type alias Response =
-    { message : Bytes
+    { messages : Array Bytes
+    , headers : Dict String String
     }
+
+
+rawMessageDecoder : Bytes.Decode.Decoder Bytes
+rawMessageDecoder =
+    Bytes.Decode.unsignedInt32 Bytes.BE
+        |> Bytes.Decode.andThen Bytes.Decode.bytes
+
+
+headersDecoder : Bytes.Decode.Decoder (Dict String String)
+headersDecoder =
+    Bytes.Decode.unsignedInt32 Bytes.BE
+        |> Bytes.Decode.andThen Bytes.Decode.string
+        |> Bytes.Decode.map
+            (String.lines
+                >> List.filterMap
+                    (\header ->
+                        case String.split ":" header of
+                            [] ->
+                                Nothing
+
+                            [ _ ] ->
+                                Nothing
+
+                            key :: valueParts ->
+                                Just <| ( key, String.join ":" valueParts )
+                    )
+                >> Dict.fromList
+            )
 
 
 responseDecoder : Bytes.Decode.Decoder Response
 responseDecoder =
-    Bytes.Decode.map2 (\_ -> Response)
-        (Bytes.Decode.bytes 1)
-        (Bytes.Decode.unsignedInt32 Bytes.BE
-            |> Bytes.Decode.andThen Bytes.Decode.bytes
+    let
+        decodeIsTrailer =
+            Bytes.Decode.map
+                (Bitwise.and 0x80 >> (/=) 0)
+                Bytes.Decode.unsignedInt8
+    in
+    Bytes.Decode.loop
+        Array.empty
+        (\messages ->
+            decodeIsTrailer
+                |> Bytes.Decode.andThen
+                    (\isTrailer ->
+                        if isTrailer then
+                            headersDecoder
+                                |> Bytes.Decode.map
+                                    (\headers ->
+                                        Bytes.Decode.Done
+                                            { messages = messages
+                                            , headers = headers
+                                            }
+                                    )
+
+                        else
+                            rawMessageDecoder
+                                |> Bytes.Decode.map
+                                    (\message ->
+                                        Bytes.Decode.Loop <|
+                                            Array.push message messages
+                                    )
+                    )
         )
 
 
