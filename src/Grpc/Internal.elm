@@ -1,6 +1,7 @@
 module Grpc.Internal exposing
     ( Rpc(..)
-    , ResponseDecoder, singleMessageDecoder, streamToListDecoder
+    , ResponseDecoder, singleMessageDecoder
+    , ServerStream(..), serverStreamDecoder
     )
 
 {-| Internals that are intended to be used from code generators.
@@ -10,6 +11,16 @@ module Grpc.Internal exposing
 
 @docs Rpc
 
+
+# Response decoding
+
+@docs ResponseDecoder, singleMessageDecoder
+
+
+# Server streaming
+
+@docs ServerStream, serverStreamDecoder
+
 -}
 
 import Array exposing (Array)
@@ -18,6 +29,8 @@ import Protobuf.Decode exposing (Decoder)
 import Protobuf.Encode exposing (Encoder)
 
 
+{-| Turn the messages of a response into its value, or `Nothing` if they don't decode.
+-}
 type alias ResponseDecoder res =
     Array Bytes -> Maybe res
 
@@ -49,7 +62,7 @@ the corresponding Rpc instance would be
         , package = "helloworld"
         , rpcName = "SayHello"
         , encoder = helloRequestEncoder
-        , decoder = helloReplyDecoder
+        , decoder = Grpc.Internal.singleMessageDecoder helloReplyDecoder
         }
 
 where `helloRequestEncoder` and `helloReplyDecoder` are Encoders/Decoders built with `elm-protocol-buffers`.
@@ -65,32 +78,24 @@ type Rpc req res
         }
 
 
+{-| Decode the response of a unary rpc, which carries one message.
+-}
 singleMessageDecoder : Decoder res -> ResponseDecoder res
 singleMessageDecoder decoder =
     Array.get 0
         >> Maybe.andThen (Protobuf.Decode.decode decoder)
 
 
-streamToListDecoder : Decoder res -> ResponseDecoder (List res)
-streamToListDecoder decoder =
-    Array.toList
-        >> List.map (Protobuf.Decode.decode decoder)
-        >> combineMaybes
+{-| The messages a server-streaming rpc responded with, each still undecoded. Code generators give a server-streaming
+rpc the response type `ServerStream res`, and `Grpc.Streaming.fromRequest` takes a request for one.
+-}
+type ServerStream res
+    = ServerStream (Array Bytes) (Decoder res)
 
 
-combineMaybes : List (Maybe a) -> Maybe (List a)
-combineMaybes =
-    let
-        helper : List a -> List (Maybe a) -> Maybe (List a)
-        helper acc maybes =
-            case maybes of
-                [] ->
-                    Just <| List.reverse acc
-
-                Nothing :: _ ->
-                    Nothing
-
-                (Just x) :: xs ->
-                    helper (x :: acc) xs
-    in
-    helper []
+{-| Wrap the messages of a server-streaming response in a `ServerStream` without decoding them. This never fails;
+`Grpc.Streaming` decodes each message when it reads it.
+-}
+serverStreamDecoder : Decoder res -> ResponseDecoder (ServerStream res)
+serverStreamDecoder decoder frames =
+    Just (ServerStream frames decoder)

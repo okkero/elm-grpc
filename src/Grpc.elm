@@ -202,7 +202,8 @@ Since the request is just a HTTP request under the hood, it may fail in the roug
     <https://github.com/grpc/grpc/blob/master/doc/http-grpc-status-mapping.md>
 
   - `BadBody` means you got a response back with a nice status code, but the body
-    of the response was something unexpected. The `Bytes` in this case is the response that failed to be parsed.
+    of the response was something unexpected. The `Bytes` in this case is the response that failed to be parsed,
+    or, when `Grpc.Streaming` fails to decode one message of a server stream, that message.
 
   - `UnknownGrpcStatus` means you got a response back but the `grpc-status` header was set to either
 
@@ -327,9 +328,16 @@ handleResponse decoder httpResponse =
             in
             case grpcStatus of
                 Ok_ ->
-                    Bytes.Decode.decode
-                        responseDecoder
-                        bytes
+                    -- A response with no messages may carry its status in the headers alone and
+                    -- leave the body empty. With that status present, an empty body is a response
+                    -- with no messages; without it, the body must still end in a trailer frame, so
+                    -- a response cut short is not taken as empty.
+                    (if Bytes.width bytes == 0 && Dict.member "grpc-status" metadata.headers then
+                        Just { messages = Array.empty, headers = metadata.headers }
+
+                     else
+                        Bytes.Decode.decode responseDecoder bytes
+                    )
                         |> Result.fromMaybe (BadBody bytes)
                         |> Result.andThen
                             (\response ->
@@ -466,7 +474,13 @@ headersDecoder =
                                 Nothing
 
                             key :: valueParts ->
-                                Just <| ( key, String.join ":" valueParts )
+                                -- A grpc-status that is missing or doesn't parse is read as OK, so
+                                -- normalise the key and value rather than let a differently cased
+                                -- or padded error status pass as success.
+                                Just <|
+                                    ( String.toLower (String.trim key)
+                                    , String.trim (String.join ":" valueParts)
+                                    )
                     )
                 >> Dict.fromList
             )

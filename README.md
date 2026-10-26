@@ -9,8 +9,9 @@ We can merge the packages later!
 
 ## Limitations
 
-Currently, only unary requests are supported.
-If you have ideas how to implement server-side streaming, I'm open for pull requests/issues.
+Unary and server-streaming requests are supported. Read a server stream with `Grpc.Streaming`. The response is
+received in full, since Elm hands over a response body only once it is complete, and its messages are then decoded
+one at a time as they are read. It suits finite streams, not ones that stay open.
 As far as I am aware, grpc-web as a whole is blocked on client-side streaming/bidirectional streaming due to missing browser support.
 
 ## Shoutouts
